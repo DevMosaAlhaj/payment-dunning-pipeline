@@ -6,8 +6,8 @@ services:
     container_name: dunning-dashboard
     restart: unless-stopped
     networks:
-      - apps-network
+      - internal-net
 
 networks:
-  apps-network:
+  internal-net:
     external: true
