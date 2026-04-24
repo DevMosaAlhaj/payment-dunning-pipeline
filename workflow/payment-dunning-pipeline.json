@@ -1,0 +1,483 @@
+{
+  "name": "Payment Follow-Up & Dunning Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "stripe-webhook",
+        "responseMode": "lastNode"
+      },
+      "id": "node-stripe-webhook",
+      "name": "Stripe Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "notes": "Receives Stripe invoice events (payment_failed, payment_succeeded)"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-daily-cron",
+      "name": "Daily Invoice Scan",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "notes": "Scans all open/past-due invoices daily at 9 AM"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.stripe.com/v1/invoices",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "status", "value": "open" },
+            { "name": "limit", "value": "100" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-fetch-invoices",
+      "name": "Fetch Open Invoices",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 300],
+      "notes": "Fetches all open Stripe invoices",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Stripe API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "id": "node-split-invoices",
+      "name": "Split Invoices",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [480, 300],
+      "notes": "Splits invoice array into individual items"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.stripe.com/v1/invoices/{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "node-fetch-details",
+      "name": "Fetch Invoice Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "notes": "Gets full invoice with customer and line items",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Stripe API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsCode": "const invoice = $input.first().json;\nconst dueDate = new Date(invoice.due_date * 1000);\nconst now = new Date();\nconst diffMs = now.getTime() - dueDate.getTime();\nconst daysOverdue = Math.floor(diffMs / (1000 * 60 * 60 * 24));\n\nlet step = 'not_due';\nif (daysOverdue < 0 && daysOverdue >= -3) step = 'pre_due';\nelse if (daysOverdue === 1) step = 'day_1';\nelse if (daysOverdue >= 2 && daysOverdue <= 3) step = 'day_3';\nelse if (daysOverdue >= 4 && daysOverdue <= 7) step = 'day_7';\nelse if (daysOverdue >= 8 && daysOverdue <= 14) step = 'day_14';\nelse if (daysOverdue >= 30) step = 'day_30';\nelse if (daysOverdue > 0) step = 'day_1';\n\nconst amount = (invoice.amount_remaining / 100).toFixed(2);\nconst currency = invoice.currency.toUpperCase();\n\nreturn [{\n  json: {\n    invoiceId: invoice.id,\n    invoiceNumber: invoice.number || invoice.id,\n    customerId: invoice.customer,\n    customerEmail: invoice.customer_email || '',\n    customerName: invoice.customer_name || 'Customer',\n    amount: parseFloat(amount),\n    currency,\n    dueDate: dueDate.toISOString(),\n    daysOverdue,\n    dunningStep: step,\n    status: invoice.status,\n    invoiceUrl: invoice.hosted_invoice_url || ''\n  }\n}];"
+      },
+      "id": "node-classify",
+      "name": "Classify Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "notes": "Calculates days overdue and determines dunning step"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "label": "pre_due",
+              "value": "pre_due",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "pre_due", "operator": { "type": "string", "operation": "equals" } }]
+            },
+            {
+              "label": "day_1",
+              "value": "day_1",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "day_1", "operator": { "type": "string", "operation": "equals" } }]
+            },
+            {
+              "label": "day_3",
+              "value": "day_3",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "day_3", "operator": { "type": "string", "operation": "equals" } }]
+            },
+            {
+              "label": "day_7",
+              "value": "day_7",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "day_7", "operator": { "type": "string", "operation": "equals" } }]
+            },
+            {
+              "label": "day_14",
+              "value": "day_14",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "day_14", "operator": { "type": "string", "operation": "equals" } }]
+            },
+            {
+              "label": "day_30",
+              "value": "day_30",
+              "conditions": [{ "leftValue": "={{ $json.dunningStep }}", "rightValue": "day_30", "operator": { "type": "string", "operation": "equals" } }]
+            }
+          ]
+        },
+        "fallbackOutput": 6
+      },
+      "id": "node-dunning-router",
+      "name": "Dunning Step Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1200, 300],
+      "notes": "Routes invoice to appropriate dunning step"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sendgrid.com/v3/mail/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"from\": { \"email\": \"{{ $env.SENDGRID_FROM_EMAIL }}\", \"name\": \"{{ $env.SENDGRID_FROM_NAME }}\" },\n  \"personalizations\": [{ \"to\": [{ \"email\": \"{{ $json.customerEmail }}\" }], \"dynamic_template_data\": { \"customer_name\": \"{{ $json.customerName }}\", \"invoice_number\": \"{{ $json.invoiceNumber }}\", \"amount\": \"{{ $json.currency }} {{ $json.amount }}\", \"due_date\": \"{{ new Date($json.dueDate).toLocaleDateString() }}\", \"pay_url\": \"{{ $json.invoiceUrl }}\" } }],\n  \"template_id\": \"{{ $env.TEMPLATE_PRE_DUE }}\"\n}",
+        "options": {}
+      },
+      "id": "node-pre-due-email",
+      "name": "Pre-Due Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 0],
+      "notes": "Sends friendly reminder 3 days before due date",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "SendGrid API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sendgrid.com/v3/mail/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"from\": { \"email\": \"{{ $env.SENDGRID_FROM_EMAIL }}\", \"name\": \"{{ $env.SENDGRID_FROM_NAME }}\" },\n  \"personalizations\": [{ \"to\": [{ \"email\": \"{{ $json.customerEmail }}\" }], \"dynamic_template_data\": { \"customer_name\": \"{{ $json.customerName }}\", \"invoice_number\": \"{{ $json.invoiceNumber }}\", \"amount\": \"{{ $json.currency }} {{ $json.amount }}\", \"days_overdue\": 1, \"pay_url\": \"{{ $json.invoiceUrl }}\" } }],\n  \"template_id\": \"{{ $env.TEMPLATE_DAY_1 }}\"\n}",
+        "options": {}
+      },
+      "id": "node-day1-email",
+      "name": "Day 1 Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 120],
+      "notes": "Past-due email notification",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "SendGrid API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sendgrid.com/v3/mail/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"from\": { \"email\": \"{{ $env.SENDGRID_FROM_EMAIL }}\", \"name\": \"{{ $env.SENDGRID_FROM_NAME }}\" },\n  \"personalizations\": [{ \"to\": [{ \"email\": \"{{ $json.customerEmail }}\" }], \"dynamic_template_data\": { \"customer_name\": \"{{ $json.customerName }}\", \"invoice_number\": \"{{ $json.invoiceNumber }}\", \"amount\": \"{{ $json.currency }} {{ $json.amount }}\", \"days_overdue\": 3, \"pay_url\": \"{{ $json.invoiceUrl }}\" } }],\n  \"template_id\": \"{{ $env.TEMPLATE_DAY_3 }}\"\n}",
+        "options": {}
+      },
+      "id": "node-day3-email",
+      "name": "Day 3 Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 240],
+      "notes": "Day 3 urgent email + triggers SMS",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "SendGrid API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "{{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "To", "value": "={{ $json.customerPhone }}", "description": "Customer phone from HubSpot" },
+            { "name": "Body", "value": "Hi {{ $json.customerName }}, your invoice {{ $json.invoiceNumber }} for {{ $json.currency }} {{ $json.amount }} is 3 days overdue. Please pay at {{ $json.invoiceUrl }} or contact us for assistance." }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-day3-sms",
+      "name": "Day 3 SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 240],
+      "notes": "SMS escalation for Day 3",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Twilio Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sendgrid.com/v3/mail/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"from\": { \"email\": \"{{ $env.SENDGRID_FROM_EMAIL }}\", \"name\": \"{{ $env.SENDGRID_FROM_NAME }}\" },\n  \"personalizations\": [{ \"to\": [{ \"email\": \"{{ $json.customerEmail }}\" }], \"dynamic_template_data\": { \"customer_name\": \"{{ $json.customerName }}\", \"invoice_number\": \"{{ $json.invoiceNumber }}\", \"amount\": \"{{ $json.currency }} {{ $json.amount }}\", \"days_overdue\": 7, \"pay_url\": \"{{ $json.invoiceUrl }}\" } }],\n  \"template_id\": \"{{ $env.TEMPLATE_DAY_7 }}\"\n}",
+        "options": {}
+      },
+      "id": "node-day7-email",
+      "name": "Day 7 Final Notice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 360],
+      "notes": "Day 7 final notice email + SMS",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "SendGrid API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_FINANCE_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "👤 *Account Manager Action Required*\\n\\n*Invoice:* {{ $json.invoiceNumber }}\\n*Customer:* {{ $json.customerName }}\\n*Amount:* {{ $json.currency }} {{ $json.amount }}\\n*Days Overdue:* {{ $json.daysOverdue }}\\n*Action:* Personal outreach needed — all automated follow-ups sent.",
+        "options": {}
+      },
+      "id": "node-day14-manager",
+      "name": "Day 14 Manager Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 480],
+      "notes": "Notifies account manager for personal outreach"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_FINANCE_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "🚨 *Collections / Write-Off Decision Required*\\n\\n*Invoice:* {{ $json.invoiceNumber }}\\n*Customer:* {{ $json.customerName }}\\n*Amount:* {{ $json.currency }} {{ $json.amount }}\\n*Days Overdue:* {{ $json.daysOverdue }}\\n*Status:* All dunning steps exhausted. Recommend collections or write-off.",
+        "options": {}
+      },
+      "id": "node-day30-collections",
+      "name": "Day 30 Collections",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 600],
+      "notes": "Flags for collections or write-off decision"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "label": "payment_succeeded",
+              "value": "payment_succeeded",
+              "conditions": [{ "leftValue": "={{ $body.type }}", "rightValue": "invoice.payment_succeeded", "operator": { "type": "string", "operation": "equals" } }]
+            }
+          ]
+        },
+        "fallbackOutput": 1
+      },
+      "id": "node-payment-check",
+      "name": "Payment Event?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [240, 0],
+      "notes": "Routes: payment received → stop sequence, else → classify"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.sendgrid.com/v3/mail/send",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"from\": { \"email\": \"{{ $env.SENDGRID_FROM_EMAIL }}\", \"name\": \"{{ $env.SENDGRID_FROM_NAME }}\" },\n  \"personalizations\": [{ \"to\": [{ \"email\": \"{{ $body.data.object.customer_email }}\" }], \"dynamic_template_data\": { \"customer_name\": \"{{ $body.data.object.customer_name }}\" } }],\n  \"template_id\": \"{{ $env.TEMPLATE_PAYMENT_RECEIVED }}\"\n}",
+        "options": {}
+      },
+      "id": "node-payment-confirmation",
+      "name": "Payment Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, -80],
+      "notes": "Sends payment received confirmation email",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "SendGrid API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "node-weekly-cron",
+      "name": "Weekly Report Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 600],
+      "notes": "Triggers every Monday at 10 AM"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.stripe.com/v1/invoices",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "status", "value": "open" },
+            { "name": "limit", "value": "100" },
+            { "name": "due_date[lt]", "value": "={{ Math.floor(Date.now() / 1000) }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-report-fetch",
+      "name": "Fetch Overdue for Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 600],
+      "notes": "Fetches all overdue invoices for weekly summary",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Stripe API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsCode": "const invoices = $input.first().json.data || [];\nconst total = invoices.length;\nconst totalAmount = invoices.reduce((sum, inv) => sum + inv.amount_remaining, 0) / 100;\nconst avgDaysOverdue = total > 0 ? invoices.reduce((sum, inv) => sum + Math.floor((Date.now() - inv.due_date * 1000) / 86400000), 0) / total : 0;\nconst bucket1to7 = invoices.filter(i => Math.floor((Date.now() - i.due_date * 1000) / 86400000) <= 7).length;\nconst bucket8to14 = invoices.filter(i => { const d = Math.floor((Date.now() - i.due_date * 1000) / 86400000); return d > 7 && d <= 14; }).length;\nconst bucket15to30 = invoices.filter(i => { const d = Math.floor((Date.now() - i.due_date * 1000) / 86400000); return d > 14 && d <= 30; }).length;\nconst bucket30plus = invoices.filter(i => Math.floor((Date.now() - i.due_date * 1000) / 86400000) > 30).length;\n\nreturn [{\n  json: {\n    date: new Date().toISOString().split('T')[0],\n    total_overdue: total,\n    total_amount: totalAmount.toFixed(2),\n    avg_days_overdue: Math.round(avgDaysOverdue),\n    aging: { '1-7 days': bucket1to7, '8-14 days': bucket8to14, '15-30 days': bucket15to30, '30+ days': bucket30plus }\n  }\n}];"
+      },
+      "id": "node-calculate-report",
+      "name": "Calculate Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 600],
+      "notes": "Computes weekly recovery analytics"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_FINANCE_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "📊 *Weekly Revenue Recovery Report — {{ $json.date }}*\\n\\n*Total Overdue Invoices:* {{ $json.total_overdue }}\\n*Total Outstanding:* ${{ $json.total_amount }}\\n*Avg Days Overdue:* {{ $json.avg_days_overdue }}\\n\\n*Aging Buckets:*\\n• 1-7 days: {{ $json.aging['1-7 days'] }} invoices\\n• 8-14 days: {{ $json.aging['8-14 days'] }} invoices\\n• 15-30 days: {{ $json.aging['15-30 days'] }} invoices\\n• 30+ days: {{ $json.aging['30+ days'] }} invoices",
+        "options": {}
+      },
+      "id": "node-send-report",
+      "name": "Send Weekly Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 600],
+      "notes": "Posts weekly recovery report to Slack"
+    }
+  ],
+  "connections": {
+    "Daily Invoice Scan": {
+      "main": [[{ "node": "Fetch Open Invoices", "type": "main", "index": 0 }]]
+    },
+    "Fetch Open Invoices": {
+      "main": [[{ "node": "Split Invoices", "type": "main", "index": 0 }]]
+    },
+    "Split Invoices": {
+      "main": [[{ "node": "Fetch Invoice Details", "type": "main", "index": 0 }]]
+    },
+    "Fetch Invoice Details": {
+      "main": [[{ "node": "Classify Invoice", "type": "main", "index": 0 }]]
+    },
+    "Classify Invoice": {
+      "main": [[{ "node": "Dunning Step Router", "type": "main", "index": 0 }]]
+    },
+    "Dunning Step Router": {
+      "main": [
+        [{ "node": "Pre-Due Reminder", "type": "main", "index": 0 }],
+        [{ "node": "Day 1 Email", "type": "main", "index": 0 }],
+        [{ "node": "Day 3 Email", "type": "main", "index": 0 }],
+        [{ "node": "Day 7 Final Notice", "type": "main", "index": 0 }],
+        [{ "node": "Day 14 Manager Alert", "type": "main", "index": 0 }],
+        [{ "node": "Day 30 Collections", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Day 3 Email": {
+      "main": [[{ "node": "Day 3 SMS", "type": "main", "index": 0 }]]
+    },
+    "Stripe Webhook": {
+      "main": [[{ "node": "Payment Event?", "type": "main", "index": 0 }]]
+    },
+    "Payment Event?": {
+      "main": [
+        [{ "node": "Payment Confirmation", "type": "main", "index": 0 }],
+        [{ "node": "Fetch Invoice Details", "type": "main", "index": 0 }]
+      ]
+    },
+    "Weekly Report Trigger": {
+      "main": [[{ "node": "Fetch Overdue for Report", "type": "main", "index": 0 }]]
+    },
+    "Fetch Overdue for Report": {
+      "main": [[{ "node": "Calculate Report", "type": "main", "index": 0 }]]
+    },
+    "Calculate Report": {
+      "main": [[{ "node": "Send Weekly Report", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
